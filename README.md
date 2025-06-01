@@ -1,0 +1,1 @@
+Simple aplication using esp32-S3-N16R8, PAM8403 amplifier and 20x20x5mm speaker.
