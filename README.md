@@ -1,1 +1,1 @@
-Simple aplication using esp32-S3-N16R8, PAM8403 amplifier and 20x20x5mm speaker.
+Simple aplication using esp32-S3-N16R8, MAX98357A, 20x20x5mm Round 8 Ohm 1W speaker and a micro sd card reader. The ESP32-S3-N16R8 does not have a built-in DAC but has I2S.
