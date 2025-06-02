@@ -46,8 +46,8 @@ sdmmc_card_t *card;
 i2s_chan_handle_t tx_chan; // Handle para el canal de transmisión I2S
 
 // ***** NUEVO: Factor de volumen (0.0 a 1.0) y porcentaje *****
-static volatile float volume_factor = 0.25f; // Por defecto, 25% de volumen
-static volatile uint8_t current_volume_percentage = 25; // Porcentaje actual de volumen (0-100)
+static volatile float volume_factor = 0.80f; // Por defecto, 25% de volumen
+static volatile uint8_t current_volume_percentage = 80; // Porcentaje actual de volumen (0-100)
 #define VOLUME_STEP 5 // Cuánto cambia el volumen con cada pulsación (en porcentaje)
 
 // ----- Configuración de Botones de Volumen (Pins updated as per user log) -----
