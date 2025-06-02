@@ -16,6 +16,8 @@
 
 // ---- Includes para la NUEVA API I2S ----
 #include "driver/i2s_std.h" // Nueva API para modo estándar I2S
+#include "driver/gpio.h"    // Para control de GPIO (botones)
+
 
 // ---- Includes Adicionales ----
 #include <inttypes.h>   // Para PRIu32, PRIu16, etc.
@@ -26,7 +28,7 @@ static const char *TAG = "AUDIO_PLAYER";
 
 // ----- Configuración de la Tarjeta SD -----
 #define MOUNT_POINT "/sdcard"
-#define SPI_BUS_HOST SPI2_HOST 
+#define SPI_BUS_HOST SPI2_HOST
 
 #define PIN_NUM_MISO GPIO_NUM_13
 #define PIN_NUM_MOSI GPIO_NUM_11
@@ -36,15 +38,22 @@ static const char *TAG = "AUDIO_PLAYER";
 sdmmc_card_t *card;
 
 // ----- Configuración de I2S (Nueva API) -----
-#define I2S_PORT_NUM         (I2S_NUM_0) 
+#define I2S_PORT_NUM         (I2S_NUM_0)
 #define I2S_BCK_IO      (GPIO_NUM_5)
-#define I2S_WS_IO       (GPIO_NUM_6) 
-#define I2S_DO_IO       (GPIO_NUM_4) 
+#define I2S_WS_IO       (GPIO_NUM_6)
+#define I2S_DO_IO       (GPIO_NUM_4)
 
 i2s_chan_handle_t tx_chan; // Handle para el canal de transmisión I2S
 
-// ***** NUEVO: Factor de volumen (0.0 a 1.0) *****
-static float volume_factor = 1.0f; // Por defecto, 100% de volumen
+// ***** NUEVO: Factor de volumen (0.0 a 1.0) y porcentaje *****
+static volatile float volume_factor = 0.25f; // Por defecto, 25% de volumen
+static volatile uint8_t current_volume_percentage = 25; // Porcentaje actual de volumen (0-100)
+#define VOLUME_STEP 5 // Cuánto cambia el volumen con cada pulsación (en porcentaje)
+
+// ----- Configuración de Botones de Volumen (Pins updated as per user log) -----
+#define GPIO_VOLUME_UP   GPIO_NUM_15 // Pin para subir volumen (was GPIO_NUM_14)
+#define GPIO_VOLUME_DOWN GPIO_NUM_16 // Pin para bajar volumen (was GPIO_NUM_15)
+#define DEBOUNCE_TIME_MS 50       // Tiempo de antirrebote para los botones
 
 typedef struct {
     char riff_header[4];
@@ -58,7 +67,7 @@ typedef struct {
     uint32_t byte_rate;
     uint16_t block_align;
     uint16_t bits_per_sample;
-    char data_header[4]; 
+    char data_header[4];
     uint32_t data_size;
 } wav_header_t;
 
@@ -75,7 +84,7 @@ void init_sdcard() {
     };
 
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-    host.slot = SPI_BUS_HOST; 
+    host.slot = SPI_BUS_HOST;
 
     spi_bus_config_t bus_cfg = {
         .mosi_io_num = PIN_NUM_MOSI,
@@ -83,7 +92,7 @@ void init_sdcard() {
         .sclk_io_num = PIN_NUM_CLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = 4000, 
+        .max_transfer_sz = 4000,
     };
 
     ret = spi_bus_initialize(host.slot, &bus_cfg, SPI_DMA_CH_AUTO);
@@ -106,7 +115,6 @@ void init_sdcard() {
             ESP_LOGE(TAG, "Failed to initialize the card (%s). Check CS pin, connections, and card format.", esp_err_to_name(ret));
         }
         card = NULL;
-        // spi_bus_free(host.slot); // Comentado, ya que el bus podría ser necesario para otros dispositivos o reintentos
         return;
     }
     ESP_LOGI(TAG, "Filesystem mounted");
@@ -122,10 +130,10 @@ void list_sdcard_files(const char *path) {
     }
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
-        char full_path[256 + 20]; 
-        if (strcmp(path, MOUNT_POINT) == 0 && path[strlen(path)-1] == '/') { 
+        char full_path[256 + 20];
+        if (strcmp(path, MOUNT_POINT) == 0 && path[strlen(path)-1] == '/') {
              snprintf(full_path, sizeof(full_path), "%s%s", MOUNT_POINT, entry->d_name);
-        } else if (strcmp(path, MOUNT_POINT) == 0) { 
+        } else if (strcmp(path, MOUNT_POINT) == 0) {
              snprintf(full_path, sizeof(full_path), "%s/%s", MOUNT_POINT, entry->d_name);
         }
          else {
@@ -136,9 +144,9 @@ void list_sdcard_files(const char *path) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
             continue;
         }
-        
+
         if (stat(full_path, &entry_stat) == -1) {
-            if (strstr(full_path, "System Volume Information") == NULL) { 
+            if (strstr(full_path, "System Volume Information") == NULL) {
                  ESP_LOGW(TAG, "Failed to stat %s: %s. Skipping.", full_path, strerror(errno));
             }
             continue;
@@ -158,8 +166,9 @@ void list_sdcard_files(const char *path) {
 // Función para ajustar el volumen
 void set_volume(uint8_t percentage) {
     if (percentage > 100) percentage = 100;
-    volume_factor = (float)percentage / 100.0f;
-    ESP_LOGI(TAG, "Volume set to %.2f%%", volume_factor * 100.0f);
+    current_volume_percentage = percentage; // Actualizar la variable global de porcentaje
+    volume_factor = (float)current_volume_percentage / 100.0f;
+    ESP_LOGI(TAG, "Volume set to %u%% (factor: %.2f)", current_volume_percentage, volume_factor);
 }
 
 void play_wav(const char *filepath) {
@@ -184,7 +193,7 @@ void play_wav(const char *filepath) {
         fclose(fp);
         return;
     }
-    
+
     if (wav_header.fmt_chunk_size > 16) {
         ESP_LOGI(TAG, "fmt_chunk_size is %" PRIu32 ", skipping %" PRIu32 " extra bytes.", wav_header.fmt_chunk_size, wav_header.fmt_chunk_size - 16);
         if (fseek(fp, wav_header.fmt_chunk_size - 16, SEEK_CUR) != 0) {
@@ -195,12 +204,12 @@ void play_wav(const char *filepath) {
     }
 
     while (1) {
-        if (fread(wav_header.data_header, 1, 4, fp) != 4) { 
+        if (fread(wav_header.data_header, 1, 4, fp) != 4) {
             ESP_LOGE(TAG, "Failed to read chunk ID while searching for 'data'.");
             fclose(fp);
             return;
         }
-        if (fread(&wav_header.data_size, 1, 4, fp) != 4) { 
+        if (fread(&wav_header.data_size, 1, 4, fp) != 4) {
             ESP_LOGE(TAG, "Failed to read chunk size while searching for 'data'.");
             fclose(fp);
             return;
@@ -213,7 +222,7 @@ void play_wav(const char *filepath) {
                 fclose(fp);
                 return;
             }
-            break; 
+            break;
         }
         if (fseek(fp, wav_header.data_size, SEEK_CUR) != 0) {
              ESP_LOGE(TAG, "Failed to seek past unknown chunk '%.4s'.", wav_header.data_header);
@@ -231,42 +240,42 @@ void play_wav(const char *filepath) {
         fclose(fp);
         return;
     }
-    
+
     if (wav_header.bits_per_sample != 8 && wav_header.bits_per_sample != 16 &&
         wav_header.bits_per_sample != 24 && wav_header.bits_per_sample != 32) {
         ESP_LOGE(TAG, "Unsupported bits per sample: %" PRIu16 ". Only 8, 16, 24, or 32-bit supported by I2S driver.", wav_header.bits_per_sample);
         fclose(fp);
         return;
     }
-    
+
     if (tx_chan != NULL) {
         ESP_LOGI(TAG, "Disabling and deleting previous I2S TX channel.");
-        i2s_channel_disable(tx_chan); // Intentar deshabilitar, ignorar error si ya está deshabilitado
-        i2s_del_channel(tx_chan);     // Intentar eliminar, ignorar error si ya está eliminado
+        i2s_channel_disable(tx_chan);
+        i2s_del_channel(tx_chan);
         tx_chan = NULL;
     }
-    
+
     ESP_LOGI(TAG, "Configuring I2S TX channel...");
     i2s_chan_config_t chan_cfg = {
         .id = I2S_PORT_NUM,
         .role = I2S_ROLE_MASTER,
-        .dma_desc_num = 8, 
-        .dma_frame_num = 256, 
-        .auto_clear = true, 
+        .dma_desc_num = 8,
+        .dma_frame_num = 256,
+        .auto_clear = true,
     };
-    ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &tx_chan, NULL)); 
+    ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &tx_chan, NULL));
 
     i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(wav_header.sample_rate);
-    
-    i2s_std_slot_config_t slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG((i2s_data_bit_width_t)wav_header.bits_per_sample, 
+
+    i2s_std_slot_config_t slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG((i2s_data_bit_width_t)wav_header.bits_per_sample,
                                                                    (wav_header.num_channels == 2) ? I2S_SLOT_MODE_STEREO : I2S_SLOT_MODE_MONO);
-    
+
     i2s_std_gpio_config_t gpio_cfg = {
-        .mclk = I2S_GPIO_UNUSED, 
+        .mclk = I2S_GPIO_UNUSED,
         .bclk = I2S_BCK_IO,
         .ws = I2S_WS_IO,
         .dout = I2S_DO_IO,
-        .din = I2S_GPIO_UNUSED, 
+        .din = I2S_GPIO_UNUSED,
         .invert_flags = {
             .mclk_inv = false,
             .bclk_inv = false,
@@ -286,13 +295,13 @@ void play_wav(const char *filepath) {
     ESP_LOGI(TAG, "I2S reconfigured for WAV: SR=%" PRIu32 ", BPS=%" PRIu16 ", CH=%" PRIu16,
              wav_header.sample_rate, wav_header.bits_per_sample, wav_header.num_channels);
 
-    int buffer_size = wav_header.block_align > 0 ? wav_header.block_align * 256 : 2048; 
-    if (buffer_size > 4096) buffer_size = 4096; 
+    int buffer_size = wav_header.block_align > 0 ? wav_header.block_align * 256 : 2048;
+    if (buffer_size > 4096) buffer_size = 4096;
     uint8_t *buffer = malloc(buffer_size);
     if (!buffer) {
         ESP_LOGE(TAG, "Failed to allocate read buffer of size %d", buffer_size);
         fclose(fp);
-        if (tx_chan) { // Solo limpiar si tx_chan fue inicializado
+        if (tx_chan) {
             i2s_channel_disable(tx_chan);
             i2s_del_channel(tx_chan);
             tx_chan = NULL;
@@ -304,13 +313,13 @@ void play_wav(const char *filepath) {
     size_t bytes_written;
     uint32_t total_bytes_played = 0;
 
-    ESP_LOGI(TAG, "Starting playback... Buffer size: %d bytes. Volume: %.0f%%", buffer_size, volume_factor * 100.0f);
+    ESP_LOGI(TAG, "Starting playback... Buffer size: %d bytes. Current Volume: %u%%", buffer_size, current_volume_percentage);
     uint64_t start_time = esp_timer_get_time();
 
     while (total_bytes_played < wav_header.data_size) {
-        size_t to_read = (wav_header.data_size - total_bytes_played < buffer_size) ? 
+        size_t to_read = (wav_header.data_size - total_bytes_played < buffer_size) ?
                          (wav_header.data_size - total_bytes_played) : buffer_size;
-        
+
         bytes_read = fread(buffer, 1, to_read, fp);
         if (bytes_read == 0) {
             if (feof(fp)) {
@@ -321,8 +330,8 @@ void play_wav(const char *filepath) {
             break;
         }
 
-        // ***** MODIFICACIÓN PARA EL VOLUMEN *****
-        if (volume_factor < 0.999f) { // Evitar procesamiento si el volumen es 100% (o muy cercano)
+        // Aplicar factor de volumen global
+        if (volume_factor < 0.999f) { // Evitar procesamiento si el volumen es 100%
             if (wav_header.bits_per_sample == 16) {
                 int16_t *samples = (int16_t *)buffer;
                 size_t num_samples = bytes_read / sizeof(int16_t);
@@ -330,30 +339,17 @@ void play_wav(const char *filepath) {
                     samples[i] = (int16_t)((float)samples[i] * volume_factor);
                 }
             } else if (wav_header.bits_per_sample == 8) {
-                // Para 8-bit PCM, los datos suelen ser unsigned (0-255), con 128 como silencio.
-                // Convertimos a signed, escalamos, y volvemos a unsigned.
                 uint8_t *samples = (uint8_t *)buffer;
                 size_t num_samples = bytes_read / sizeof(uint8_t);
                 for (size_t i = 0; i < num_samples; i++) {
-                    int16_t sample_signed = (int16_t)samples[i] - 128; // Convertir a signed alrededor de 0
+                    int16_t sample_signed = (int16_t)samples[i] - 128;
                     sample_signed = (int16_t)((float)sample_signed * volume_factor);
-                    if (sample_signed > 127) sample_signed = 127;     // Clamp a rango de 8-bit signed
-                    else if (sample_signed < -128) sample_signed = -128; // Clamp
-                    samples[i] = (uint8_t)(sample_signed + 128);      // Convertir de nuevo a unsigned
+                    if (sample_signed > 127) sample_signed = 127;
+                    else if (sample_signed < -128) sample_signed = -128;
+                    samples[i] = (uint8_t)(sample_signed + 128);
                 }
             }
-            // Nota: Para 24-bit o 32-bit, la lógica sería similar a 16-bit pero con int32_t.
-            // Para 24-bit, el empaquetado de datos (si es 3 bytes o 4 bytes con padding) debe manejarse.
-            // Para 32-bit (PCM flotante o entero de 32 bits):
-            // else if (wav_header.bits_per_sample == 32) {
-            //     int32_t *samples = (int32_t *)buffer;
-            //     size_t num_samples = bytes_read / sizeof(int32_t);
-            //     for (size_t i = 0; i < num_samples; i++) {
-            //         samples[i] = (int32_t)((float)samples[i] * volume_factor);
-            //     }
-            // }
         }
-        // ***** FIN DE LA MODIFICACIÓN PARA EL VOLUMEN *****
 
         esp_err_t write_err = i2s_channel_write(tx_chan, buffer, bytes_read, &bytes_written, portMAX_DELAY);
         if (write_err != ESP_OK) {
@@ -370,19 +366,67 @@ void play_wav(const char *filepath) {
 
     ESP_LOGI(TAG, "Playback finished. Total bytes played: %" PRIu32 " / %" PRIu32 ". Duration: %.2f s",
             total_bytes_played, wav_header.data_size, duration_sec);
-    
-    // Esperar a que el buffer DMA se vacíe
-    vTaskDelay(pdMS_TO_TICKS(100)); // Aumentado un poco por si acaso, o calcularlo.
-                                    // Cálculo: (dma_desc_num * dma_frame_num * bytes_per_frame) / byte_rate_del_wav
-                                    // ej: (8 desc * 256 frames/desc * 4 bytes/frame) / (44100 Hz * 4 bytes/frame) = 0.046s = 46ms
-                                    // Así que 50-100ms debería ser suficiente en la mayoría de los casos.
 
-    // Deshabilitar canal I2S pero no eliminarlo todavía, podría reproducirse otro archivo
+    vTaskDelay(pdMS_TO_TICKS(100));
+
     if(tx_chan) ESP_ERROR_CHECK(i2s_channel_disable(tx_chan));
-    
+
     free(buffer);
     fclose(fp);
 }
+
+// ***** NUEVA FUNCIÓN: Tarea para controlar el volumen con botones *****
+static void volume_control_task(void *arg) {
+    // Configurar los pines de los botones
+    gpio_config_t io_conf;
+    io_conf.intr_type = GPIO_INTR_DISABLE; // Sin interrupciones por ahora
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.pin_bit_mask = (1ULL << GPIO_VOLUME_UP) | (1ULL << GPIO_VOLUME_DOWN);
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.pull_up_en = GPIO_PULLUP_ENABLE; // Habilitar pull-up interno
+    gpio_config(&io_conf);
+
+    ESP_LOGI(TAG, "Volume control task started. UP: GPIO%d, DOWN: GPIO%d", GPIO_VOLUME_UP, GPIO_VOLUME_DOWN);
+
+    TickType_t last_press_time_up = 0;
+    TickType_t last_press_time_down = 0;
+
+    while (1) {
+        TickType_t now = xTaskGetTickCount();
+
+        // Botón Subir Volumen (activo bajo debido al pull-up)
+        if (gpio_get_level(GPIO_VOLUME_UP) == 0) {
+            if ((now - last_press_time_up) * portTICK_PERIOD_MS > DEBOUNCE_TIME_MS) {
+                ESP_LOGD(TAG, "Volume UP button pressed");
+                uint8_t new_volume = current_volume_percentage + VOLUME_STEP;
+                if (new_volume > 100) new_volume = 100;
+                if (new_volume != current_volume_percentage) {
+                    set_volume(new_volume);
+                }
+                last_press_time_up = now;
+            }
+        }
+
+
+        // Botón Bajar Volumen (activo bajo debido al pull-up)
+        if (gpio_get_level(GPIO_VOLUME_DOWN) == 0) {
+            if ((now - last_press_time_down) * portTICK_PERIOD_MS > DEBOUNCE_TIME_MS) {
+                ESP_LOGD(TAG, "Volume DOWN button pressed");
+                int temp_volume = (int)current_volume_percentage - VOLUME_STEP;
+                uint8_t new_volume;
+                if (temp_volume < 0) new_volume = 0;
+                else new_volume = (uint8_t)temp_volume;
+
+                if (new_volume != current_volume_percentage) {
+                    set_volume(new_volume);
+                }
+                last_press_time_down = now;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
 
 void app_main(void) {
     ESP_LOGI(TAG, "ESP32-S3 Audio Player from SD Card (New I2S API)");
@@ -393,36 +437,31 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(ret);
 
+    set_volume(current_volume_percentage);
+
     init_sdcard();
+
+    // ***** NUEVO: Crear la tarea para el control de volumen, AUMENTAR STACK *****
+    xTaskCreate(volume_control_task, "volume_task", 3072, NULL, 5, NULL); // Stack increased to 3072 bytes
+
 
     if (card != NULL) {
         list_sdcard_files(MOUNT_POINT);
-        
-        // Establecer el volumen deseado (ej. 30%)
-        set_volume(25); // Puedes cambiar este valor (0-100)
-        play_wav(MOUNT_POINT "/SONG.WAV"); // Asegúrate de que este archivo exista
-
-        // Ejemplo de cambio de volumen para otra canción:
-        // ESP_LOGI(TAG, "Playing next song with different volume");
-        // set_volume(75);
-        // play_wav(MOUNT_POINT "/OTRA_CANCION.WAV"); 
+        play_wav(MOUNT_POINT "/SONG.WAV");
     } else {
         ESP_LOGE(TAG, "SD card not initialized. Cannot play audio.");
     }
 
-    // Limpieza final del canal I2S si fue inicializado
     if (tx_chan != NULL) {
         ESP_LOGI(TAG, "Cleaning up I2S TX channel.");
-        // El canal ya debería estar deshabilitado al final de play_wav
-        // Solo necesitamos eliminarlo. Si no fue deshabilitado, i2s_del_channel puede fallar.
-        // Por seguridad, podemos llamar a disable aquí también.
-        i2s_channel_disable(tx_chan); 
+        i2s_channel_disable(tx_chan);
         i2s_del_channel(tx_chan);
         tx_chan = NULL;
     }
-    
+
     ESP_LOGI(TAG, "Program ended. ESP will idle or you can add a loop/restart.");
     while(1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        ESP_LOGI(TAG, "Main task idling. Current volume: %u%%", current_volume_percentage);
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
