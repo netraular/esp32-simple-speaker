@@ -1,80 +1,74 @@
-Simple aplication using esp32-S3-N16R8, MAX98357A, 20x20x5mm Round 8 Ohm 1W speaker and a micro sd card reader. The ESP32-S3-N16R8 does not have a built-in DAC but has I2S.
-Connections
+Simple speaker app using ESP32-S3-N16R8, MAX98357A, 20x20x5mm Round 8 Ohm 1W speaker and a micro SD card reader. The ESP32-S3-N16R8 does not have a built-in DAC but has I2S.
 
-    ESP32-S3-N16R8 Dev Board: Your microcontroller. We'll use its I2S and SPI peripherals.
+Max 98357A data: [Adafruit MAX98357 I2S Class-D Mono Amp](https://learn.adafruit.com/adafruit-max98357-i2s-class-d-mono-amp/pinouts)
 
-    MAX98357A Breakout Board:
+## Connections
 
-        VIN or VCC: Connect to 3.3V from ESP32 (or 5V if your board and ESP32 board can supply it safely; 3.3V is generally safer and works).
+### Components:
+*   **ESP32-S3-N16R8 Dev Board**: Microcontroller.
+*   **MAX98357A Breakout Board**: I2S Mono Amplifier.
+*   **Micro SD Card Reader**: For SPI communication.
+*   **Speaker**: 8 Ohm, 1W.
 
-        GND: Connect to GND on ESP32.
+### MAX98357A Breakout Board to ESP32-S3:
 
-        DIN (Data In): Connect to ESP32's I2S Data Out pin.
+*   **VIN (MAX98357A)**: Connect to **3.3V** from ESP32. (Your current setup).
+    *   *Power Output Note*: With 3.3V into an 8Ω speaker, expect approx. 0.6W @ 1% THD or 0.8W @ 10% THD.
+*   **GND (MAX98357A)**: Connect to **GND** on ESP32.
+*   **DIN (Data In, MAX98357A)**: Connect to ESP32's **I2S Data Out pin (GPIO4)**.
+*   **BCLK (Bit Clock, MAX98357A)**: Connect to ESP32's **I2S Bit Clock pin (GPIO5)**.
+*   **LRCK or WS (Left/Right Clock or Word Select, MAX98357A)**: Connect to ESP32's **I2S Word Select pin (GPIO6)**.
+*   **GAIN (MAX98357A)**:
+    *   **Your current setup**: Connected to **VIN (3.3V)**. This sets the gain to **6dB**.
+    *   *Other options (refer to datasheet)*:
+        *   Floating (unconnected): 9dB (default on Adafruit breakout)
+        *   To GND: 12dB
+        *   100K resistor to GND: 15dB
+        *   100K resistor to VIN: 3dB
+*   **SD (Shutdown Mode / Channel Select, MAX98357A)**:
+    *   **Your current setup**: **Unconnected**.
+    *   The Adafruit breakout board has a 1MΩ pull-up resistor from its SD pin to VIN, and the MAX98357A chip has an internal 100kΩ pull-down resistor on its SD pin.
+    *   When the SD pin on the breakout is **unconnected** and VIN is 3.3V:
+        *   A voltage divider is formed: `V_SD = VIN * (100kΩ / (1MΩ + 100kΩ)) = 3.3V * (100/1100) ≈ 0.3V`.
+        *   According to the datasheet, a voltage between 0.16V and 0.77V on the SD pin sets the output to **(Left + Right)/2 (Stereo Average)**. This is the active mode for your current setup.
+    *   *Other common configurations for SD pin*:
+        *   To get **Left Channel Only**: Connect the `SD` pin on the breakout to `VIN` (3.3V). This makes V_SD > 1.4V.
+        *   To **Shutdown** the amplifier: Connect the `SD` pin on the breakout to `GND`. This makes V_SD < 0.16V.
+*   **OUT+ / OUT- (or SPK+ / SPK-)**: Connect to your 8 Ohm 1W speaker.
 
-        BCLK (Bit Clock): Connect to ESP32's I2S Bit Clock pin.
+### Micro SD Card Reader to ESP32-S3:
 
-        LRCK or WS (Left/Right Clock or Word Select): Connect to ESP32's I2S Word Select pin.
+*   **VCC**: Connect to **3.3V** from ESP32.
+*   **GND**: Connect to **GND** on ESP32.
+*   **MISO (Master In, Slave Out)**: Connect to ESP32's **SPI MISO pin (GPIO13)**.
+*   **MOSI (Master Out, Slave In)**: Connect to ESP32's **SPI MOSI pin (GPIO11)**.
+*   **SCK or CLK (Serial Clock)**: Connect to ESP32's **SPI Clock pin (GPIO12)**.
+*   **CS or SS (Chip Select or Slave Select)**: Connect to ESP32's **SPI CS pin (GPIO10)**.
 
-        GAIN (Optional): You can set the gain. Often, connecting it to GND gives 9dB, VDD gives 6dB, floating gives 12dB, etc. Check your MAX98357A breakout datasheet. For simplicity, let's try leaving it floating or connecting to GND first.
+## Pin Definitions in `main.c`:
 
-        SD (Shutdown Mode): Connect to 3.3V to enable the amplifier. If tied low or floating, it might be off.
+Corresponds to the connections above.
 
-        OUT+ / OUT- (or SPK+ / SPK-): Connect to your 8 Ohm 1W speaker. Polarity usually doesn't matter for a single small speaker.
+*   **I2S (MAX98357A):**
+    *   `I2S_DO_IO` (Data Out): `GPIO_NUM_4`
+    *   `I2S_BCK_IO` (Bit Clock): `GPIO_NUM_5`
+    *   `I2S_WS_IO` (Word Select/LRCK): `GPIO_NUM_6`
+*   **SPI (Micro SD Card Reader - SPI2_HOST):**
+    *   `PIN_NUM_MOSI`: `GPIO_NUM_11`
+    *   `PIN_NUM_MISO`: `GPIO_NUM_13`
+    *   `PIN_NUM_CLK`: `GPIO_NUM_12`
+    *   `PIN_NUM_CS`: `GPIO_NUM_10`
 
-    Micro SD Card Reader:
-
-        VCC: Connect to 3.3V from ESP32.
-
-        GND: Connect to GND on ESP32.
-
-        MISO (Master In, Slave Out): Connect to ESP32's SPI MISO pin.
-
-        MOSI (Master Out, Slave In): Connect to ESP32's SPI MOSI pin.
-
-        SCK or CLK (Serial Clock): Connect to ESP32's SPI Clock pin.
-
-        CS or SS (Chip Select or Slave Select): Connect to any available ESP32 GPIO pin.
-
-2. Pin Definitions (Example - Refer to Your Board Image)
-
-Let's pick some pins from your ESP32-S3 board image.
-
-    For MAX98357A (I2S):
-
-        I2S Data Out (DIN): GPIO4 (labeled ADC1_3, TOUCH4, RTC, GPIOX)
-
-        I2S Bit Clock (BCLK): GPIO5 (labeled ADC1_4, TOUCH5, RTC, GPIOX)
-
-        I2S Word Select (LRCK/WS): GPIO6 (labeled ADC1_5, TOUCH6, RTC, GPIOX)
-
-    For Micro SD Card Reader (SPI - using VSPI/SPI2_HOST):
-
-        SPI MOSI (MOSI): GPIO11 (labeled FSPID, ADC2_0, TOUCH11, RTC, GPIOX)
-
-        SPI MISO (MISO): GPIO13 (labeled FSPIQ, ADC2_2, TOUCH13, RTC, GPIOX)
-
-        SPI Clock (SCK): GPIO12 (labeled FSPICLK, ADC2_1, TOUCH12, RTC, GPIOX)
-
-        SPI Chip Select (CS): GPIO10 (labeled FSPIHD, ADC1_9, TOUCH9, RTC, GPIOX)
-
-    Power:
-
-        3V3 pins on your board to VIN/VCC of MAX98357A and SD card reader.
-
-        GND pins on your board to GND of MAX98357A and SD card reader.
-
-        MAX98357A SD pin to a 3V3 pin.
-
-Wiring Diagram Sketch:
+## Wiring Diagram Sketch:
 ```
 ESP32-S3                         MAX98357A
   3V3 ---------------------------- VIN
   GND ---------------------------- GND
-  GPIO4 (I2S_DATA_OUT) ----------- DIN
-  GPIO5 (I2S_BCLK) --------------- BCLK
-  GPIO6 (I2S_LRCK) --------------- LRCK
-  3V3 ---------------------------- SD (Shutdown, tie HIGH to enable)
-  (GAIN pin as per datasheet, e.g., to GND for 9dB)
+  GPIO4 (I2S_DO_IO) -------------- DIN
+  GPIO5 (I2S_BCK_IO) ------------- BCLK
+  GPIO6 (I2S_WS_IO) -------------- LRCK
+  (SD pin on breakout unconnected) -- Amplifier ON, Output: (Left+Right)/2 (Stereo Average)
+  3.3V (VIN) --------------------- GAIN (Sets Gain to 6dB)
                                    OUT+ --- Speaker --- OUT-
 
 ESP32-S3                         Micro SD Card Reader
@@ -84,4 +78,8 @@ ESP32-S3                         Micro SD Card Reader
   GPIO13 (SPI_MISO) -------------- MISO
   GPIO12 (SPI_SCK) --------------- SCK
   GPIO10 (SPI_CS) ---------------- CS
-  ```
+```
+
+## Notes:
+*   The `main.c` code plays mono audio. Since your MAX98357A is configured for (Left+Right)/2 (Stereo Average), it will effectively play the mono signal. If your WAV files are stereo, they will be mixed down to mono by the amplifier. If they are mono, the left and right channels effectively carry the same data, so (L+R)/2 will still be the mono signal.
+*   Ensure your WAV files are PCM format, 8-bit or 16-bit, as supported by the `play_wav` function.
