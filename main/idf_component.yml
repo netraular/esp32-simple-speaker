@@ -1,0 +1,7 @@
+## IDF Component Manager Manifest File
+dependencies:
+  ## Required IDF version
+  idf:
+    version: '>=4.4'
+  lvgl/lvgl: ^9.2.2
+  espressif/button: ^4.0.0
