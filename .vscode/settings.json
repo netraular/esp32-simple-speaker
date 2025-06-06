@@ -7,9 +7,5 @@
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32s3"
   },
-  "idf.flashType": "UART",
-  "files.associations": {
-    "config.h": "c",
-    "lvgl.h": "c"
-  }
+  "idf.flashType": "UART"
 }
